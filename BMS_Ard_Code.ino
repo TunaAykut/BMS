@@ -1,0 +1,446 @@
+//Libraries required for temperature sensor are added.
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+//Temperature sensor pin and variable defined.
+#define ONE_WIRE_BUS 4
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+//Digital pins controlling relays are named.
+int R1 = 6;
+int R2 = 7;
+int R3 = 8;
+int R4 = 9;
+int R5 = 10;
+int R6 = 11;
+int HB_to_Cap = 12;
+int Cap_to_LB = 13;
+int Role_pin = 5;
+
+//Global variables of SoC calculation are defined.
+int lastTime1 = 0;
+int nowTime1 = 0;
+long T_diff = 0;
+double total_Ah = 0;
+double total_Ah_discharge = 0;
+double total_Ah_charge = 0;
+double guncel_Ah = 0;
+double Cap_Ah = 3.3;
+
+//SoC correcting flag
+int soc_corr_flag = 0;
+
+//int kontak_sure = 500; //c-balance ile batt.'larin bagli kalma sureleri
+//int min_dengeleme_tekrari = 100;
+
+//Resistor values for voltage calculation are defined.
+//Real values of resistors are used for precision.
+float r3 = 9.98;
+float r4 = 98.6;
+float r22 = 56.0;
+float r21 = 46.5;
+float r24 = 76.4;
+float r23 = 32.6;
+
+//Voltage values are defined.
+float V_volt_1 = 0;
+float V_volt_2 = 0;
+float V_volt_3 = 0;
+
+bool ISIK = 0;
+
+double I_amp1 = 0;
+double SoC;
+float T = 0;
+
+//Global values for balancing are defined.
+int max_cell = 0;
+int min_cell = 0;
+
+float max_volt = 0;
+float min_volt = 0;
+
+int denge_cycle_no = 10;
+
+bool balance_ok = 1;
+
+//Void setup is run once at the beginning.
+void setup() {
+  //Baudrate is given.
+  Serial.begin(112500);
+  
+  //All digital pins are set whether they are inputs or outputs.
+  pinMode(2, INPUT_PULLUP);
+  pinMode(3, INPUT_PULLUP);
+  pinMode(4, INPUT);
+  pinMode(5, OUTPUT);
+  pinMode(6, OUTPUT);
+  pinMode(7, OUTPUT);
+  pinMode(8, OUTPUT);
+  pinMode(9, OUTPUT);
+  pinMode(10, OUTPUT);
+  pinMode(11, OUTPUT);
+  pinMode(12, OUTPUT);
+  pinMode(13, OUTPUT);
+
+  //Initial values if the relays are set to LOW except emergency relay to prevent any short circuits between cells.
+  digitalWrite(R1, LOW);
+  digitalWrite(R2, LOW);
+  digitalWrite(R3, LOW);
+  digitalWrite(R4, LOW);
+  digitalWrite(R5, LOW);
+  digitalWrite(R6, LOW);
+  digitalWrite(HB_to_Cap, LOW);
+  digitalWrite(Cap_to_LB, LOW);
+  digitalWrite(Role_pin, HIGH);
+}
+
+//A function to disconnect batteries.
+void All_BATT_Disconnect (){
+  digitalWrite(R1, LOW);
+  digitalWrite(R2, LOW);
+  digitalWrite(R3, LOW);
+  delay(200);
+  digitalWrite(R4, LOW);
+  digitalWrite(R5, LOW);
+  digitalWrite(R6, LOW);
+  delay(200);
+}
+
+//A function to choose B1 and B2.
+void BATT1_to_BATT2_contact (){
+  All_BATT_Disconnect();
+  digitalWrite(R4, HIGH);
+  digitalWrite(R5, LOW);
+  digitalWrite(R6, LOW);
+  delay(200);
+  digitalWrite(R1, HIGH);
+  digitalWrite(R2, HIGH);
+  digitalWrite(R3, LOW);
+  delay(200);
+}
+
+//A function to choose B1 and B3.
+void BATT1_to_BATT3_contact (){
+  All_BATT_Disconnect();
+  digitalWrite(R4, HIGH);
+  digitalWrite(R5, LOW);
+  digitalWrite(R6, LOW);
+  delay(200);
+  digitalWrite(R1, HIGH);
+  digitalWrite(R2, LOW);
+  digitalWrite(R3, HIGH);
+  delay(200);
+}
+
+//A function to choose B2 and B3.
+void BATT2_to_BATT3_contact (){
+  All_BATT_Disconnect();
+  digitalWrite(R4, LOW);
+  digitalWrite(R5, HIGH);
+  digitalWrite(R6, LOW);
+  delay(200);
+  digitalWrite(R1, LOW);
+  digitalWrite(R2, HIGH);
+  digitalWrite(R3, HIGH);
+  delay(200);
+}  
+
+//A function to balance two chosen cells.
+void Dengele (int Count){
+  Serial.print(" BALANCING= ");
+  Serial.print(max_cell);
+  Serial.print(" - ");
+  Serial.print(min_cell);
+  Serial.print("| ");
+  int i = 0;
+  while (i < Count)
+  {
+    digitalWrite(HB_to_Cap, HIGH);
+    //AQZ205 Turn on time 5.8 ms
+    delay(6);
+    //Full Battery => Capacitor
+    delay(2);
+    digitalWrite(HB_to_Cap, LOW);
+    //AQZ205 Turn off time 0.2 ms
+    delay(1);
+    digitalWrite(Cap_to_LB, HIGH);
+    //AQZ205 Turn on time 5.8 ms
+    delay(6);
+    //Capacitor => Low Battery
+    delay(2);
+    digitalWrite(Cap_to_LB, LOW);
+    //AQZ205 Turn off time 0.2 ms
+    delay(1);
+
+    i++;
+  }
+    //Solid state relays are left LOW to prevent short circuit.
+    digitalWrite(Cap_to_LB, LOW);
+    digitalWrite(HB_to_Cap, LOW);
+}
+
+//A function to read and print voltage values of 3 Li-ions cells.
+void BATT_V_oku() {
+  //Local raw analog sensor values are defined.
+  int V_raw_sensor_value_1 = 0;
+  int V_raw_sensor_value_2 = 0;
+  int V_raw_sensor_value_3 = 0;
+
+  float V_temp_1 = 0;
+  float V_temp_2 = 0;
+  float V_temp_3 = 0;
+
+  //Analog values are read.
+  V_raw_sensor_value_1 = analogRead(A3);
+  V_raw_sensor_value_2 = analogRead(A4);
+  V_raw_sensor_value_3 = analogRead(A5);
+
+  //Voltage values are calculated considering each resistance value.
+  V_temp_1 = (V_raw_sensor_value_1 * 5.0) / 1023.0; // FORMULA USED TO CONVERT THE VOLTAGE
+  V_volt_1 = V_temp_1 / (r4/(r3+r4));
+
+  V_temp_2 = (V_raw_sensor_value_2 * 5.0) / 1023.0; // FORMULA USED TO CONVERT THE VOLTAGE
+  V_volt_2 = V_temp_2 / (r21/(r22+r21));
+
+  V_temp_3 = (V_raw_sensor_value_3 * 5.0) / 1023.0; // FORMULA USED TO CONVERT THE VOLTAGE
+  V_volt_3 = V_temp_3 / (r23/(r24+r23));
+
+  V_volt_2 = V_volt_2 - V_volt_1;
+  V_volt_3 = V_volt_3 - V_volt_2 - V_volt_1;
+
+  //Voltage values are printed.
+  Serial.print(" V1= ");
+  Serial.print(V_volt_1);
+  Serial.print("| ");
+
+  Serial.print(" V2= ");
+  Serial.print(V_volt_2);
+  Serial.print("| ");
+  
+  Serial.print(" V3= ");
+  Serial.print(V_volt_3);
+  Serial.print("| ");
+
+}
+
+//A function to read and print current value.
+void BATT_I_oku() {
+  //Local raw analog sensor value is defined.
+  int I_raw_sensor_value_1 = 0;
+  //Analog value is read.
+  I_raw_sensor_value_1 = analogRead(A0);
+  //Current value in A is calculated
+  //considering the output of MAX471.
+  I_amp1 = I_raw_sensor_value_1 * (5.0 / 1023.0);
+
+  //Current values are digitally filtered.
+  if(I_amp1 < 0.09){
+    I_amp1 = 0;
+  }
+
+//==========================================================================================
+
+  //Millisecond value is taken to be used in SoC calculation.
+  nowTime1 = millis();
+  //Considering the differentiation of the main loop,
+  //time difference is taken into account.
+  T_diff = nowTime1 - lastTime1;
+  lastTime1 = nowTime1;
+
+  //Millisecond is converted into hours.
+  double T_diff_sec = (float)T_diff / 1000;
+  double T_diff_min = T_diff_sec / 60;
+  double T_diff_h = T_diff_min / 60;
+
+  //Ah spent in each measurement is calculated.
+  double Ah = T_diff_h * I_amp1;
+
+  //Detection of whether charging or dishcarging is made using 2 digital inputs.
+  int C = digitalRead(2);
+  int D = digitalRead(3);
+
+  if(D == 1 && C == 0){           //Ah of discharging substracted from SoC
+    soc_corr_flag = 1;
+    total_Ah_discharge += Ah;
+    SoC = (Cap_Ah - total_Ah_discharge) / Cap_Ah * 100;
+    guncel_Ah = Cap_Ah - total_Ah_discharge;
+  } else if(C == 1 && D == 0){    //Ah of charging added to SoC
+    soc_corr_flag = 1;
+    total_Ah_charge += Ah;
+    SoC = (guncel_Ah + total_Ah_charge) / Cap_Ah * 100;
+  } else {                        //Idle state - SoC correction flag is changed
+    if(soc_corr_flag == 1){       //just to prevent SoC from starting as 0%
+      soc_corr_flag = 1;
+    }
+  }
+  //total_Ah += Ah;
+  if(soc_corr_flag == 0){
+    SoC = 100;
+  }
+  
+  if(SoC > 100){
+    SoC = 100;
+  }
+  
+//==========================================================================================
+
+  //Printing current value in Amperes.
+  Serial.print(" I= ");
+  Serial.print(I_amp1);
+  Serial.print("| ");
+
+  //Printing SoC value in percentage.
+  Serial.print(" SoC = ");
+  Serial.print(" %");
+  Serial.print(SoC, 6);
+  Serial.print("| ");
+
+}
+
+//A function to read and print temperature value.
+void BATT_T_oku() {
+  //Sensor value is read.
+  sensors.requestTemperatures();
+  T = sensors.getTempCByIndex(0);
+  
+  //Sensor value is printed.
+  Serial.print(" T= ");
+  Serial.print(T);
+  Serial.println("| ");
+}
+
+//A funtion to find max and min voltage cells.
+void min_max_cell_bul(){
+  max_cell = 0;
+  min_cell = 0;
+
+  max_cell = 1;
+  min_cell = 1;
+
+  max_volt = V_volt_1;
+  min_volt = V_volt_1;
+
+  if(V_volt_2 < min_volt){
+    min_volt = V_volt_2;
+    min_cell = 2;
+  }
+
+  if(V_volt_3 < min_volt){
+    min_volt = V_volt_3;
+    min_cell = 3;
+  }
+
+  if(V_volt_2 > max_volt){
+    max_volt = V_volt_2;
+    max_cell = 2;
+  }
+
+  if(V_volt_3 > max_volt){
+    max_volt = V_volt_3;
+    max_cell = 3;
+  }
+}
+
+//A function to change balance_ok flag.
+//balance_ok flag exists to prevent
+//balancing in not ordinary conditions.
+void balance_check(){
+  if(V_volt_1 < 3 || V_volt_1 > 4.5 || V_volt_2 < 3 || V_volt_2 > 4.5 || V_volt_3 < 3 || V_volt_3 > 4.5){
+    balance_ok = 0;
+  }
+}
+
+//-MAIN-LOOP-
+void loop() {
+  //Flag is refreshed at the beginning of each loop.
+  balance_ok = 1;
+  //Voltage values are read.
+  BATT_V_oku();
+  //Flag is updated.
+  balance_check();
+  //Current value is read.
+  BATT_I_oku();
+  //Temperature value is read.
+  BATT_T_oku();
+  //Max and min cells are found.
+  min_max_cell_bul();
+
+  //If balance_ok flag is one and voltage difference is larger than 0.2,
+  //balancing is done between chosen max and min cells.
+  //Because of the fact that balancing
+  if(max_volt - min_volt > 0.2 && balance_ok == 1){
+    switch (max_cell) {
+      case 1:
+          switch (min_cell)
+          {
+          case 2:
+          BATT1_to_BATT2_contact();
+          Dengele(denge_cycle_no);
+          break;
+
+          case 3:
+          BATT1_to_BATT3_contact();
+          Dengele(denge_cycle_no);
+          break;
+
+          default:
+          break;
+          }
+      break;
+
+      case 2:
+          switch (min_cell)
+          {
+          case 1:
+          BATT1_to_BATT2_contact();
+          Dengele(denge_cycle_no);
+          break;
+
+          case 3:
+          BATT2_to_BATT3_contact();
+          Dengele(denge_cycle_no);
+          break;
+
+          default:
+          break;
+          }
+      break;
+
+      case 3:
+          switch (min_cell)
+          {
+          case 1:
+          BATT1_to_BATT3_contact();
+          Dengele(denge_cycle_no);
+          break;
+
+          case 2:
+          BATT2_to_BATT3_contact();
+          Dengele(denge_cycle_no);
+          break;
+
+          default:
+          break;
+          }
+      break;
+
+      default:
+      break;
+    }
+  }
+
+  // If V, I and T values are at extreme amounts
+  // such that they would cause an emergency
+  // Safety relay is set to open and takes out
+  // from the rest of the ciruit.
+  if(V_volt_1 > 4.5 || V_volt_2 > 4.5 || V_volt_3 > 4.5 || I_amp1 > 3 || V_volt_1 < 2 || V_volt_2 < 2 || V_volt_3 < 2 || T > 50){
+    digitalWrite(Role_pin, LOW);
+  }
+  //A string named Interface which consists of measured and processed variables,
+  //is formed to send values to the personal computer for interface.
+  Interface = "|V1=" + String(V_volt_1,6) + "|V2=" + String(V_volt_2,6) + "|V3=" + String(V_volt_3,6) + "|I=" + String(I_amp1,6) + "|SoC" String(I_amp1,6) +  "|T=" + String(T,6) );
+  Serial.println(Interface);
+  
+}
